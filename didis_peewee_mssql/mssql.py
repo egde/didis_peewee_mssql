@@ -1,7 +1,7 @@
-from peewee import Database
+from peewee import Database, Context, ModelSelect
 import pyodbc
-from loguru import logger
 import re
+from loguru import logger
 
 class MSSQLServer(Database):
 
@@ -70,56 +70,75 @@ class MSSQLServer(Database):
                                       params=('BASE TABLE',))
 
         return [r[0] for r in cursor.fetchall()]
+
+    def last_insert_id(self, cursor, query_type = ...):
+        return cursor.fetchone()[0]
+
+    def _handle_create_table(self, query):
+        if type(query) == Context:
+            sql_elements: list[str] = query._sql
+
+            if sql_elements[0] == 'CREATE TABLE ':
+                if sql_elements[1] == 'IF NOT EXISTS ':
+                    table_name = sql_elements[2].replace('"','')
+                    adapted_sql = f'''IF OBJECT_ID(N'{table_name}', N'U') IS NULL '''
+                    sql_elements = [adapted_sql] + sql_elements
+                    sql_elements.remove('IF NOT EXISTS ')
+                    query._sql = sql_elements
+        return query
+
+    def _handle_create_index(self, query):
+        if type(query) == Context:
+            sql_elements: list[str] = query._sql
+
+            if sql_elements[0] == 'CREATE INDEX ' or sql_elements[0] == 'CREATE UNIQUE INDEX ':
+                if sql_elements[1] == 'IF NOT EXISTS ':
+                    index_name = sql_elements[2].replace('"','')
+                    table_name = sql_elements[4].replace('"','')
+                    adapted_sql = f'''IF NOT EXISTS (SELECT * FROM SYSINDEXES WHERE id=OBJECT_ID('{table_name}') and name='{index_name}') '''
+                    sql_elements = [adapted_sql] + sql_elements
+                    sql_elements.remove('IF NOT EXISTS ')
+                    query._sql = sql_elements
+        return query
     
-    def _sql_rewrite_create_table(self, sql: str) -> str:
-        string_to_be_replaced = 'CREATE TABLE IF NOT EXISTS'
-        if sql.startswith(string_to_be_replaced):
-            pattern = r'CREATE TABLE IF NOT EXISTS ("(.*?)".)?"(.*?)"'
-            schema_name = re.search(pattern=pattern, string=sql).group(2)
-            schema_name = schema_name if schema_name is not None else 'dbo'
-            table_name = re.search(pattern=pattern, string=sql).group(3)
+    def _sql_select(self, sql:str, params:list):
+        if sql.startswith('SELECT'):
+            if 'LIMIT ? OFFSET ?' in sql:
+                #  Get'LIMIT' and 'OFFSET' clauses to swap their values within the list of parameters
+                parameters = re.findall(pattern=r'(\w*) \?', string=sql)
+                for i in range(len(parameters)):
+                    if parameters[i] == 'LIMIT':
+                        ind_limit = i
+                    if parameters[i] == 'OFFSET':
+                        ind_offset = i
+                limit = params[ind_limit]
+                offset = params[ind_offset]
+                params[ind_limit] = offset
+                params[ind_offset] = limit
+                
+                # Adding ORDER 1 to order by the first column, if it is missing
+                if not 'ORDER BY' in sql:
+                    sql = sql.replace('LIMIT ? OFFSET ?', 'ORDER BY 1 OFFSET ? ROWS FETCH NEXT ? ROWS ONLY')
+                else:
+                    sql = sql.replace('LIMIT ? OFFSET ?', 'OFFSET ? ROWS FETCH NEXT ? ROWS ONLY')
+        return sql, params
 
-            replacement = f'''IF OBJECT_ID(N'{schema_name}.{table_name}', N'U') IS NULL
-            CREATE TABLE '''
-            return sql.replace(string_to_be_replaced, replacement)
+            
+    def _sql_insert(self, sql:str):
+        if sql.startswith('INSERT INTO'):
+            add = 'OUTPUT INSERTED.ID VALUES'
+            sql = sql.replace('VALUES', add)
         return sql
+        
     
-    def _sql_rewrite_create_index(self, sql: str) -> str:
-        string_to_be_replaced = 'CREATE INDEX IF NOT EXISTS'
-        if sql.startswith(string_to_be_replaced):
-            pattern_index_name = r'CREATE INDEX IF NOT EXISTS "(.*?)"'
-            index_name = re.search(pattern=pattern_index_name, string=sql).group(1)
-
-            pattern_table_name = r'ON ("(.*?)".)?"(.*?)"'
-            schema_name = re.search(pattern=pattern_table_name, string=sql).group(2)
-            schema_name = schema_name if schema_name is not None else 'dbo'
-            table_name = re.search(pattern=pattern_table_name, string=sql).group(3)
-
-            replacement = f'''IF NOT EXISTS (SELECT * FROM SYSINDEXES WHERE id=OBJECT_ID('{schema_name}.{table_name}') and name='{index_name}') 
-            CREATE INDEX '''
-            return sql.replace(string_to_be_replaced, replacement)
-        return sql
+    def execute(self, query, commit=..., **context_options):
+        query = self._handle_create_table(query)
+        query = self._handle_create_index(query)
+        return super().execute(query, commit, **context_options)
     
-    def _sql_rewrite_create_unique_index(self, sql: str) -> str:
-        string_to_be_replaced = 'CREATE UNIQUE INDEX IF NOT EXISTS'
-        if sql.startswith(string_to_be_replaced):
-            pattern_index_name = r'CREATE UNIQUE INDEX IF NOT EXISTS "(.*?)"'
-            index_name = re.search(pattern=pattern_index_name, string=sql).group(1)
-
-            pattern_table_name = r'ON ("(.*?)".)?"(.*?)"'
-            schema_name = re.search(pattern=pattern_table_name, string=sql).group(2)
-            schema_name = schema_name if schema_name is not None else 'dbo'
-            table_name = re.search(pattern=pattern_table_name, string=sql).group(3)
-
-            replacement = f'''IF NOT EXISTS (SELECT * FROM SYSINDEXES WHERE id=OBJECT_ID('{schema_name}.{table_name}') and name='{index_name}') 
-            CREATE UNIQUE INDEX '''
-            return sql.replace(string_to_be_replaced, replacement)
-        return sql
-
     def execute_sql(self, sql, params = ..., commit=...):
-        sql = self._sql_rewrite_create_table(sql)
-        sql = self._sql_rewrite_create_index(sql)
-        sql = self._sql_rewrite_create_unique_index(sql)
+        sql = self._sql_insert(sql)
+        sql, params = self._sql_select(sql, params)
         logger.debug(f'''execute_sql - SQL: 
                             {sql}
 
