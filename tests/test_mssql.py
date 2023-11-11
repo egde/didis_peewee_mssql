@@ -7,7 +7,7 @@ import pytest
 from decouple import config
 
 from didis_peewee_mssql.mssql import MSSQLServer
-from peewee import Model, CharField, DateField, ForeignKeyField, BlobField, IdentityField
+from peewee import Model, CharField, DateField, ForeignKeyField, BlobField, IdentityField, fn, JOIN
 
 database = config('DB_DB')
 user=config('DB_USER')
@@ -169,6 +169,44 @@ def test_select_table():
     pets:list[Pet] = Pet.select().where(Pet.animal_type == 'cat')
     for pet in pets:
         assert pet.owner == person, "the right person is the owner"
+
+    query = (Person
+            .select(Person, fn.COUNT(Pet.id).alias('pet_count'))
+            .join(Pet, JOIN.LEFT_OUTER)  # include people without pets.
+            .group_by(Person)
+            .order_by(Person.name)
+            .limit(2)
+            )
+
+    for person in query:
+        # "pet_count" becomes an attribute on the returned model instances.
+        print(person.name, person.pet_count, 'pets')
+
+
+    query = (Person
+        .select(Person, fn.COUNT(Pet.id).alias('pet_count'))
+        .join(Pet, JOIN.LEFT_OUTER)  # include people without pets.
+        .group_by(Person)
+        .order_by(Person.name)
+        .limit(1)
+        .offset(1)
+        )
+
+    for person in query:
+        # "pet_count" becomes an attribute on the returned model instances.
+        print(person.name, person.pet_count, 'pets')
+
+    query = (Person
+        .select(Person, fn.COUNT(Pet.id).alias('pet_count'))
+        .join(Pet, JOIN.LEFT_OUTER)  # include people without pets.
+        .group_by(Person)
+        .order_by(Person.name)
+        .offset(1)
+        )
+
+    for person in query:
+        # "pet_count" becomes an attribute on the returned model instances.
+        print(person.name, person.pet_count, 'pets')
 
     db.execute_sql(sql='''
                    drop table pet

@@ -121,6 +121,17 @@ class MSSQLServer(Database):
                     sql = sql.replace('LIMIT ? OFFSET ?', 'ORDER BY 1 OFFSET ? ROWS FETCH NEXT ? ROWS ONLY')
                 else:
                     sql = sql.replace('LIMIT ? OFFSET ?', 'OFFSET ? ROWS FETCH NEXT ? ROWS ONLY')
+            elif 'LIMIT ?' in sql:
+                #  Get'LIMIT' and set it as the first parameter in TOP
+                parameters = re.findall(pattern=r'(\w*) \?', string=sql)
+                for i in range(len(parameters)):
+                    if parameters[i] == 'LIMIT':
+                        ind_limit = i
+                limit = params.pop(ind_limit) # Remove parameters, TOP cannot be parameterized
+                sql = sql.replace('SELECT', f'SELECT TOP {limit}') # use top
+                sql = sql.replace('LIMIT ?', '') # Remove it
+            elif 'OFFSET ?' in sql:
+                sql = sql.replace('OFFSET ?', f'OFFSET ? ROWS') # use top
         return sql, params
 
             
